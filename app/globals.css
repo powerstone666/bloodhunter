@@ -1,26 +1,150 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-surface: var(--surface);
+  --color-surface-container: var(--surface-container);
+  --color-surface-variant: var(--surface-variant);
+  --color-on-surface: var(--on-surface);
+  --color-on-surface-variant: var(--on-surface-variant);
+  --color-primary: var(--primary);
+  --color-primary-container: var(--primary-container);
+  --color-on-primary: var(--on-primary);
+  --color-on-primary-container: var(--on-primary-container);
+  --color-secondary: var(--secondary);
+  --color-secondary-container: var(--secondary-container);
+  --color-on-secondary: var(--on-secondary);
+  --color-on-secondary-container: var(--on-secondary-container);
+  --color-tertiary: var(--tertiary);
+  --color-tertiary-container: var(--tertiary-container);
+  --color-on-tertiary: var(--on-tertiary);
+  --color-on-tertiary-container: var(--on-tertiary-container);
+  --color-error: var(--error);
+  --color-error-container: var(--error-container);
+  --color-on-error: var(--on-error);
+  --color-on-error-container: var(--on-error-container);
+  --color-outline: var(--outline);
+  --color-outline-variant: var(--outline-variant);
+  --color-surface-tint: var(--surface-tint);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 28px;
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+:root {
+  --background: oklch(0.985 0.002 247.858);
+  --foreground: oklch(0.17 0.01 247.858);
+  --surface: oklch(0.985 0.002 247.858);
+  --surface-container: oklch(0.96 0.005 247.858);
+  --surface-variant: oklch(0.92 0.01 247.858);
+  --on-surface: oklch(0.17 0.01 247.858);
+  --on-surface-variant: oklch(0.45 0.02 247.858);
+  --primary: oklch(0.45 0.15 247.858);
+  --primary-container: oklch(0.9 0.05 247.858);
+  --on-primary: oklch(1 0 0);
+  --on-primary-container: oklch(0.2 0.05 247.858);
+  --secondary: oklch(0.5 0.05 247.858);
+  --secondary-container: oklch(0.93 0.02 247.858);
+  --on-secondary: oklch(1 0 0);
+  --on-secondary-container: oklch(0.25 0.02 247.858);
+  --tertiary: oklch(0.55 0.1 300);
+  --tertiary-container: oklch(0.92 0.04 300);
+  --on-tertiary: oklch(1 0 0);
+  --on-tertiary-container: oklch(0.3 0.04 300);
+  --error: oklch(0.55 0.22 25);
+  --error-container: oklch(0.93 0.08 25);
+  --on-error: oklch(1 0 0);
+  --on-error-container: oklch(0.3 0.08 25);
+  --outline: oklch(0.75 0.01 247.858);
+  --outline-variant: oklch(0.88 0.005 247.858);
+  --surface-tint: oklch(0.45 0.15 247.858);
+  
+  --card: var(--surface-container);
+  --card-foreground: var(--on-surface);
+  --popover: var(--surface-container);
+  --popover-foreground: var(--on-surface);
+  --muted: var(--surface-variant);
+  --muted-foreground: var(--on-surface-variant);
+  --accent: var(--secondary-container);
+  --accent-foreground: var(--on-secondary-container);
+  --destructive: var(--error);
+  --destructive-foreground: var(--on-error);
+  --border: var(--outline-variant);
+  --input: var(--surface-variant);
+  --ring: var(--primary);
+}
+
+.dark {
+  --background: oklch(0.14 0.01 247.858);
+  --foreground: oklch(0.93 0.005 247.858);
+  --surface: oklch(0.14 0.01 247.858);
+  --surface-container: oklch(0.2 0.01 247.858);
+  --surface-variant: oklch(0.28 0.015 247.858);
+  --on-surface: oklch(0.93 0.005 247.858);
+  --on-surface-variant: oklch(0.75 0.01 247.858);
+  --primary: oklch(0.75 0.18 247.858);
+  --primary-container: oklch(0.35 0.12 247.858);
+  --on-primary: oklch(0.2 0.08 247.858);
+  --on-primary-container: oklch(0.95 0.03 247.858);
+  --secondary: oklch(0.75 0.1 247.858);
+  --secondary-container: oklch(0.3 0.06 247.858);
+  --on-secondary: oklch(0.2 0.04 247.858);
+  --on-secondary-container: oklch(0.93 0.02 247.858);
+  --tertiary: oklch(0.8 0.14 300);
+  --tertiary-container: oklch(0.35 0.08 300);
+  --on-tertiary: oklch(0.25 0.06 300);
+  --on-tertiary-container: oklch(0.92 0.03 300);
+  --error: oklch(0.75 0.18 25);
+  --error-container: oklch(0.35 0.12 25);
+  --on-error: oklch(0.25 0.1 25);
+  --on-error-container: oklch(0.93 0.04 25);
+  --outline: oklch(0.5 0.01 247.858);
+  --outline-variant: oklch(0.35 0.01 247.858);
+  --surface-tint: oklch(0.75 0.18 247.858);
+}
+
+@layer base {
+  * {
+    border-color: var(--outline-variant);
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans), system-ui, sans-serif;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
 }
+
+.animate-scale-in {
+  animation: scaleIn 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.15s ease-out forwards;
+}
+
