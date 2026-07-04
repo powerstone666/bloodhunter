@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from "react"
 import type { ScanEvent } from "@/app/(common-lib)/schemas/scan-event"
 import type { Agent } from "@/app/(common-lib)/schemas/agent"
 import type { Vulnerability } from "@/app/(common-lib)/schemas/vulnerability"
+import { useScanEvents } from "@/app/(ui)/hooks/use-scan-events"
 
 interface AgentNode extends Agent {
   children?: AgentNode[]
@@ -30,7 +31,8 @@ const COLORS = {
 }
 
 interface ScanTerminalProps {
-  events: ScanEvent[]
+  scanId: string
+  initialEvents: ScanEvent[]
   agents: Agent[]
   vulnerabilities: Vulnerability[]
 }
@@ -66,7 +68,7 @@ function isVisibleScanEvent(event: ScanEvent): boolean {
   return true
 }
 
-export function ScanTerminal({ events, agents, vulnerabilities }: ScanTerminalProps) {
+export function ScanTerminal({ scanId, initialEvents, agents, vulnerabilities }: ScanTerminalProps) {
   const [inputValue, setInputValue] = useState("")
   const inputRef = useRef<HTMLInputElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -74,20 +76,23 @@ export function ScanTerminal({ events, agents, vulnerabilities }: ScanTerminalPr
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [showVulnDetail, setShowVulnDetail] = useState(false)
 
-  const [chatMessages, setChatMessages] = useState<ScanEvent[]>(events)
+  // Subscribe to WebSocket events
+  const { events: wsEvents } = useScanEvents({
+    scanId,
+    enabled: true,
+  })
+
+  // Merge initial events with WebSocket events
+  const allEvents = [...initialEvents, ...wsEvents]
 
   // Build agent tree from flat list
   const agentTree = buildAgentTree(agents)
 
   useEffect(() => {
-    setChatMessages(events)
-  }, [events])
-
-  useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [chatMessages])
+  }, [allEvents])
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter" && inputValue.trim()) {
@@ -99,8 +104,9 @@ export function ScanTerminal({ events, agents, vulnerabilities }: ScanTerminalPr
         message: inputValue,
         timestamp: new Date().toISOString()
       }
-      setChatMessages([...chatMessages, userMsg])
       setInputValue("")
+      // Note: user messages are local only, not sent to backend
+      console.log("User message:", userMsg)
     }
   }
 
@@ -136,14 +142,14 @@ export function ScanTerminal({ events, agents, vulnerabilities }: ScanTerminalPr
                 </button>
               </div>
             )}
-            {chatMessages.filter(isVisibleScanEvent).length === 0 && (
+            {allEvents.filter(isVisibleScanEvent).length === 0 && (
               <div className="flex h-full items-center justify-center">
                 <p className="text-sm italic" style={{ color: COLORS.textMuted }}>
                   Waiting for scan activity...
                 </p>
               </div>
             )}
-            {chatMessages
+            {allEvents
               .filter(isVisibleScanEvent)
               .filter((e) => {
                 if (!selectedAgentId) return true
@@ -239,7 +245,7 @@ export function ScanTerminal({ events, agents, vulnerabilities }: ScanTerminalPr
                   key={agent.id}
                   agent={agent}
                   depth={0}
-                  events={chatMessages}
+                  events={allEvents}
                   onSelect={setSelectedAgentId}
                 />
               ))}
@@ -304,7 +310,7 @@ export function ScanTerminal({ events, agents, vulnerabilities }: ScanTerminalPr
               Stats
             </h3>
             <div className="space-y-1">
-              <StatRow label="Events" value={events.length.toString()} />
+              <StatRow label="Events" value={allEvents.length.toString()} />
               <StatRow label="Agents" value={agents.length.toString()} />
               <StatRow label="Vulnerabilities" value={vulnerabilities.length.toString()} />
             </div>

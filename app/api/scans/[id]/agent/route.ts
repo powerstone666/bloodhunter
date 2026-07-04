@@ -10,10 +10,10 @@ import { renderSystemPrompt } from "@/app/api/(services)/prompt-renderer"
 import { getAllProviders, getProviderApiKey } from "@/app/api/(db)/providers-repository"
 import { createAgent, updateAgentStatus } from "@/app/api/(db)/agents-repository"
 import { resolveActiveModel } from "@/app/api/(services)/model-registry"
-import { checkDockerRunning } from "@/app/api/(services)/docker-manager"
-import { createSandbox, DockerSandbox } from "@/app/api/(services)/docker-sandbox"
+import { getOrCreateSandbox, cleanupSandbox, DockerSandbox } from "@/app/api/(services)/docker-sandbox"
 import { log } from "@/app/api/(services)/logger"
 import { runPreflightChecks, formatPreflightErrors, formatPreflightWarnings } from "@/app/api/(services)/preflight"
+import { broadcastScanEvent } from "@/app/api/(services)/ws-broadcast"
 
 const agentRequestSchema = z.object({
   instruction: z.string().optional(),
@@ -133,6 +133,14 @@ export async function POST(
     agentProvider.name,
     {
       onProgress: (stage, message) => {
+        const event = {
+          type: "agent.log" as const,
+          scanId,
+          agentId: preflightAgentId,
+          level: "info" as const,
+          message: `[${stage.toUpperCase()}] ${message}`,
+          timestamp: new Date().toISOString(),
+        }
         createScanEvent({
           scanId,
           eventType: "agent.log",
@@ -143,8 +151,17 @@ export async function POST(
           },
           timestamp: new Date().toISOString(),
         })
+        broadcastScanEvent(scanId, event)
       },
       onDockerPull: (progress) => {
+        const event = {
+          type: "agent.log" as const,
+          scanId,
+          agentId: preflightAgentId,
+          level: "info" as const,
+          message: `[DOCKER] ${progress}`,
+          timestamp: new Date().toISOString(),
+        }
         createScanEvent({
           scanId,
           eventType: "agent.log",
@@ -155,6 +172,7 @@ export async function POST(
           },
           timestamp: new Date().toISOString(),
         })
+        broadcastScanEvent(scanId, event)
       },
     }
   )
@@ -165,6 +183,15 @@ export async function POST(
     const errorMsg = formatPreflightErrors(preflightResult.errors)
     log.error("PREFLIGHT", "Preflight checks failed", undefined, { errors: preflightResult.errors })
     
+    const event = {
+      type: "scan.failed" as const,
+      scanId,
+      error: errorMsg,
+      agentId: preflightAgentId,
+      provider: agentProvider.name,
+      model: agentProvider.defaultModel,
+      timestamp: new Date().toISOString(),
+    }
     createScanEvent({
       scanId,
       eventType: "scan.failed",
@@ -176,6 +203,7 @@ export async function POST(
       },
       timestamp: new Date().toISOString(),
     })
+    broadcastScanEvent(scanId, event)
 
     updateScanStatus(scanId, "failed", undefined, new Date().toISOString())
 
@@ -189,6 +217,14 @@ export async function POST(
     const warnMsg = formatPreflightWarnings(preflightResult.warnings)
     log.warn("PREFLIGHT", "Preflight warnings", undefined, { warnings: preflightResult.warnings })
     
+    const event = {
+      type: "agent.log" as const,
+      scanId,
+      agentId: preflightAgentId,
+      level: "warn" as const,
+      message: warnMsg,
+      timestamp: new Date().toISOString(),
+    }
     createScanEvent({
       scanId,
       eventType: "agent.log",
@@ -199,6 +235,7 @@ export async function POST(
       },
       timestamp: new Date().toISOString(),
     })
+    broadcastScanEvent(scanId, event)
   }
 
   log.success("PREFLIGHT", "All preflight checks passed", {
@@ -260,16 +297,16 @@ export async function POST(
     
     if (preflightResult.dockerReady && preflightResult.imageReady) {
       log.startTimer("sandbox-create")
-      log.info("SANDBOX", "Creating sandbox container...", { scanId, agentId, target: scan.config.targetUrl })
+      log.info("SANDBOX", "Getting or creating sandbox container...", { scanId, agentId, target: scan.config.targetUrl })
 
       try {
-        sandbox = await createSandbox({
+        sandbox = await getOrCreateSandbox({
           scanId,
           agentId,
           targetUrl: scan.config.targetUrl,
         })
         log.stopTimer("sandbox-create", "SANDBOX")
-        log.success("SANDBOX", "Sandbox container created and ready", { containerId: sandbox.getContainerId?.() || "unknown" })
+        log.success("SANDBOX", "Sandbox container ready", { containerId: sandbox.getContainerId?.() || "unknown" })
 
         createScanEvent({
           scanId,
@@ -339,12 +376,17 @@ export async function POST(
         if (eventCount % 10 === 0 || event.type === "scan.completed" || event.type === "scan.failed") {
           log.debug("EVENT", `Event #${eventCount}: ${event.type}`, { agentId })
         }
+        
+        // Store event in database
         createScanEvent({
           scanId,
           eventType: event.type,
           eventData: event as unknown as Record<string, unknown>,
           timestamp: "timestamp" in event ? String((event as Record<string, unknown>).timestamp) : new Date().toISOString(),
         })
+        
+        // Broadcast event to WebSocket clients
+        broadcastScanEvent(scanId, event)
       },
       abortSignal: abortController.signal,
     })
@@ -420,16 +462,14 @@ export async function POST(
     )
   } finally {
     // ─── CLEANUP ────────────────────────────────────────────────
-    if (sandbox) {
-      log.info("SANDBOX", "Stopping and removing sandbox container...")
-      try {
-        await sandbox.stop()
-        log.success("SANDBOX", "Sandbox container stopped and removed")
-      } catch (stopError) {
-        log.error("SANDBOX", "Failed to stop sandbox container", undefined, {
-          error: stopError instanceof Error ? stopError.message : String(stopError),
-        })
-      }
+    log.info("SANDBOX", "Cleaning up sandbox container...")
+    try {
+      await cleanupSandbox(scanId)
+      log.success("SANDBOX", "Sandbox container stopped and removed")
+    } catch (stopError) {
+      log.error("SANDBOX", "Failed to cleanup sandbox container", undefined, {
+        error: stopError instanceof Error ? stopError.message : String(stopError),
+      })
     }
   }
 }

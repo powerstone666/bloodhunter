@@ -38,6 +38,31 @@ export const scanEventSchema = z.discriminatedUnion("type", [
     agentId: z.string(),
     toolName: z.string(),
     summary: z.string(),
+    input: z.record(z.string(), z.unknown()).optional(),
+  }),
+  baseEventSchema.extend({
+    type: z.literal("tool.result"),
+    agentId: z.string(),
+    toolName: z.string(),
+    result: z.record(z.string(), z.unknown()),
+    duration: z.number().optional(),
+  }),
+  baseEventSchema.extend({
+    type: z.literal("agent.thinking"),
+    agentId: z.string(),
+    thought: z.string(),
+  }),
+  baseEventSchema.extend({
+    type: z.literal("agent.question"),
+    agentId: z.string(),
+    question: z.string(),
+    context: z.string().optional(),
+  }),
+  baseEventSchema.extend({
+    type: z.literal("methodology.step"),
+    agentId: z.string(),
+    step: z.string(),
+    phase: z.string().optional(),
   }),
   baseEventSchema.extend({
     type: z.literal("finding.created"),

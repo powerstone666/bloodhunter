@@ -36,16 +36,35 @@ export function createShellTools(ctx: ToolContext) {
         agentId: ctx.agentId,
         toolName: "exec_command",
         summary: `$ ${truncatedCmd}`,
+        input: { command: input.command, timeoutMs: input.timeoutMs },
         timestamp: new Date().toISOString(),
       })
 
       const timeout = input.timeoutMs || 30000
+      const startTime = Date.now()
 
       if (ctx.sandbox) {
         log.debug("SHELL", "Executing in Docker sandbox")
         try {
           const result = await ctx.sandbox.exec(input.command, timeout)
-          log.debug("SHELL", "Docker exec completed", { exitCode: result.exitCode, duration: `${result.duration}ms`, stdoutLen: result.stdout.length, stderrLen: result.stderr.length })
+          const duration = Date.now() - startTime
+          log.debug("SHELL", "Docker exec completed", { exitCode: result.exitCode, duration: `${duration}ms`, stdoutLen: result.stdout.length, stderrLen: result.stderr.length })
+          
+          // Emit tool result event
+          ctx.emitEvent({
+            type: "tool.result",
+            scanId: ctx.scanId,
+            agentId: ctx.agentId,
+            toolName: "exec_command",
+            result: {
+              exitCode: result.exitCode,
+              stdout: result.stdout.substring(0, 5000),
+              stderr: result.stderr.substring(0, 2000),
+            },
+            duration,
+            timestamp: new Date().toISOString(),
+          })
+
           return {
             exitCode: result.exitCode,
             stdout: result.stdout,
@@ -53,7 +72,19 @@ export function createShellTools(ctx: ToolContext) {
           }
         } catch (error) {
           const errMsg = error instanceof Error ? error.message : String(error)
+          const duration = Date.now() - startTime
           log.error("SHELL", "Docker exec failed", undefined, { error: errMsg })
+          
+          ctx.emitEvent({
+            type: "tool.result",
+            scanId: ctx.scanId,
+            agentId: ctx.agentId,
+            toolName: "exec_command",
+            result: { error: errMsg },
+            duration,
+            timestamp: new Date().toISOString(),
+          })
+
           return {
             exitCode: 1,
             stdout: "",
@@ -65,6 +96,17 @@ export function createShellTools(ctx: ToolContext) {
 
       const errorMessage = "Command blocked: Docker sandbox is required."
       log.error("SHELL", "Command blocked without Docker sandbox", { scanId: ctx.scanId, command: truncatedCmd })
+      
+      ctx.emitEvent({
+        type: "tool.result",
+        scanId: ctx.scanId,
+        agentId: ctx.agentId,
+        toolName: "exec_command",
+        result: { error: errorMessage },
+        duration: 0,
+        timestamp: new Date().toISOString(),
+      })
+
       return {
         exitCode: 1,
         stdout: "",

@@ -252,7 +252,8 @@ export default async function ScanDetailPage({ params }: ScanDetailPageProps) {
           </div>
           <div className="mt-4 rounded-xl bg-black p-4">
             <ScanTerminal 
-              events={events} 
+              scanId={scan.id}
+              initialEvents={events} 
               agents={agents} 
               vulnerabilities={vulnerabilities} 
             />

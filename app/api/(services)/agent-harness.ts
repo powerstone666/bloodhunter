@@ -1,9 +1,28 @@
+/**
+ * AgentHarness — manages the agent execution loop.
+ * 
+ * Ported from Strix's execution.py + runner.py.
+ * Key features:
+ * 
+ * 1. Proper execution loop with error recovery
+ * 2. Image stripping on 400/404/422 (model rejects images)
+ * 3. Lifecycle termination via finish_scan/agent_finish
+ * 4. Sandbox passed to tools for command execution
+ * 5. Proper cleanup on completion/failure
+ * 6. Multi-agent coordination via AgentCoordinator
+ * 7. Live event streaming via LiveView
+ * 8. Resume support via coordinator snapshots
+ */
+
 import { createDeepAgent } from "deepagents"
 import type { BaseChatModel } from "@langchain/core/language_models/chat_models"
-import type { ScanConfig, ScanEvent } from "@/app/(common-lib)/schemas"
+import type { ScanEvent } from "@/app/(common-lib)/schemas"
 import { renderReconPrompt } from "./prompt-renderer"
-import { DockerSandbox } from "./docker-sandbox"
+import { DockerSandbox, getOrCreateSandbox, cleanupSandbox } from "./docker-sandbox"
 import { log } from "./logger"
+import { AgentCoordinator } from "./agent-coordinator"
+import { LiveView } from "./live-view"
+import { ImageStripper, createImageStripper, type SessionItem } from "./image-stripper"
 import {
   createRecordNoteTool,
   createEmitLogTool,
@@ -30,17 +49,23 @@ export interface AgentConfig {
   userId: string
   model: BaseChatModel
   systemPrompt: string
-  initialTask: string
+  initialTask?: string
   onEvent: (event: ScanEvent) => void
   abortSignal?: AbortSignal
   fetchFn?: typeof fetch
   sandbox?: DockerSandbox
+  coordinator?: AgentCoordinator
+  liveView?: LiveView
+  resume?: boolean
+  snapshotPath?: string
 }
 
 export interface AgentRunResult {
   success: boolean
   output: string
   events: ScanEvent[]
+  coordinator?: AgentCoordinator
+  liveView?: LiveView
 }
 
 interface ToolContext {
@@ -51,11 +76,16 @@ interface ToolContext {
   userId: string
   abortController?: AbortController
   sandbox?: DockerSandbox
+  coordinator?: AgentCoordinator
+  liveView?: LiveView
 }
 
 export class AgentHarness {
   private events: ScanEvent[] = []
   private readonly ctx: ToolContext
+  private coordinator?: AgentCoordinator
+  private liveView?: LiveView
+  private imageStripper: ImageStripper
 
   constructor(
     private readonly scanId: string,
@@ -63,9 +93,11 @@ export class AgentHarness {
     private readonly userId: string,
     private readonly onEvent: (event: ScanEvent) => void,
     fetchFn: typeof fetch = fetch,
-    sandbox?: DockerSandbox
+    sandbox?: DockerSandbox,
+    coordinator?: AgentCoordinator,
+    liveView?: LiveView
   ) {
-    log.info("AGENT", "AgentHarness constructed", { scanId, agentId, userId, sandbox: sandbox ? "docker" : "none" })
+    log.info("AGENT", "AgentHarness constructed", { scanId, agentId, userId, sandbox: sandbox ? "docker" : "host" })
     this.ctx = {
       scanId,
       agentId,
@@ -73,12 +105,22 @@ export class AgentHarness {
       fetchFn,
       userId,
       sandbox,
+      coordinator,
+      liveView,
     }
+    this.coordinator = coordinator
+    this.liveView = liveView
+    this.imageStripper = createImageStripper()
   }
 
   private emitEvent(event: ScanEvent): void {
     this.events.push(event)
     this.onEvent(event)
+    
+    // Stream event to LiveView if available
+    if (this.liveView) {
+      this.liveView.ingestSdkEvent(this.agentId, event)
+    }
   }
 
   createTools(): StructuredTool[] {
@@ -115,6 +157,14 @@ export class AgentHarness {
 
   async run(config: Omit<AgentConfig, "scanId" | "agentId" | "onEvent">): Promise<AgentRunResult> {
     log.info("AGENT", "Agent run starting", { scanId: this.scanId, agentId: this.agentId })
+
+    // Register agent with coordinator if available
+    if (this.coordinator) {
+      await this.coordinator.register(this.agentId, "Security Agent", null, {
+        task: config.initialTask || "Security scan",
+      })
+      log.debug("AGENT", "Agent registered with coordinator")
+    }
 
     this.emitEvent({
       type: "agent.spawned",
@@ -155,6 +205,22 @@ export class AgentHarness {
     this.ctx.abortController = internalAbort
     log.debug("AGENT", "Abort controller passed to tool context")
 
+    const messages = [
+      {
+        role: "user" as const,
+        content: config.initialTask || `You MUST start working immediately by calling tools. Do NOT just describe what you plan to do - actually DO it.
+
+Your first action MUST be a tool call. Start with:
+1. Call exec_command to run: curl -sI ${config.systemPrompt.includes("Target:") ? "the target URL" : "the target"} to get initial headers
+2. Call exec_command to run reconnaissance tools (subfinder, httpx, katana, nmap, etc.)
+3. Use report_endpoint for every URL you discover
+4. Use report_finding for every vulnerability you confirm
+5. Call finish_scan ONLY when you have exhausted all testing
+
+BEGIN NOW with your first tool call.`,
+      },
+    ]
+
     try {
       log.startTimer("tool-creation")
       const tools = this.createTools()
@@ -162,7 +228,7 @@ export class AgentHarness {
 
       const customToolsDesc = getCustomToolsDescription(this.userId)
       const systemPrompt = config.systemPrompt + customToolsDesc
-      log.debug("AGENT", "System prompt assembled", {
+      log.debug("AGENT", "System prompt assembled", { 
         baseLength: config.systemPrompt.length,
         customToolsLength: customToolsDesc.length,
         totalLength: systemPrompt.length,
@@ -184,22 +250,126 @@ export class AgentHarness {
       log.info("AGENT", "Invoking DeepAgent with initial task...")
       log.startTimer("deepagent-run")
 
-      const result = await agent.invoke({
-        messages: [
-          {
-            role: "user",
-            content: config.initialTask,
-          },
-        ],
-      })
+      let result
+      let attempts = 0
+      const maxAttempts = 3
+
+      while (attempts < maxAttempts) {
+        try {
+          // Use streaming to capture intermediate events
+          const stream = await agent.stream({
+            messages,
+          })
+
+          // Process stream events
+          for await (const event of stream) {
+            // Capture all stream events for the LiveView
+            if (this.liveView) {
+              this.liveView.ingestSdkEvent(this.agentId, event)
+            }
+
+            // Emit thinking events for agent reasoning
+            if ((event as any).type === "agent" && (event as any).snapshot?.messages) {
+              const lastMessage = (event as any).snapshot.messages[(event as any).snapshot.messages.length - 1]
+              if (lastMessage?.role === "assistant" && lastMessage.content) {
+                const content = typeof lastMessage.content === "string" 
+                  ? lastMessage.content 
+                  : JSON.stringify(lastMessage.content)
+                
+                if (content && content.length > 0) {
+                  this.emitEvent({
+                    type: "agent.thinking",
+                    scanId: this.scanId,
+                    agentId: this.agentId,
+                    thought: content,
+                    timestamp: new Date().toISOString(),
+                  })
+                }
+              }
+            }
+
+            // Emit tool call events
+            if ((event as any).type === "tool" && (event as any).snapshot?.messages) {
+              const lastMessage = (event as any).snapshot.messages[(event as any).snapshot.messages.length - 1]
+              if (lastMessage?.role === "tool") {
+                const toolCall = lastMessage.tool_calls?.[0]
+                if (toolCall) {
+                  this.emitEvent({
+                    type: "tool.called",
+                    scanId: this.scanId,
+                    agentId: this.agentId,
+                    toolName: toolCall.name,
+                    summary: `Calling ${toolCall.name}`,
+                    input: toolCall.args as Record<string, unknown>,
+                    timestamp: new Date().toISOString(),
+                  })
+                }
+              }
+            }
+
+            // Emit tool result events
+            if ((event as any).type === "tool" && (event as any).snapshot?.messages) {
+              const messages = (event as any).snapshot.messages
+              const lastMessage = messages[messages.length - 1]
+              if (lastMessage?.role === "tool" && lastMessage.content) {
+                const toolCall = lastMessage.tool_calls?.[0]
+                if (toolCall) {
+                  this.emitEvent({
+                    type: "tool.result",
+                    scanId: this.scanId,
+                    agentId: this.agentId,
+                    toolName: toolCall.name,
+                    result: typeof lastMessage.content === "string" 
+                      ? { output: lastMessage.content.substring(0, 5000) }
+                      : { output: JSON.stringify(lastMessage.content).substring(0, 5000) },
+                    timestamp: new Date().toISOString(),
+                  })
+                }
+              }
+            }
+          }
+
+          // Get final result from the stream
+          result = stream
+          break
+        } catch (error) {
+          attempts++
+          
+          if (this.imageStripper.shouldStripImages(error) && this.imageStripper.hasAttempts()) {
+            log.warn("AGENT", "API rejection detected, stripping images from session", {
+              attempt: attempts,
+              error: error instanceof Error ? error.message : String(error),
+            })
+
+            const stripResult = this.imageStripper.stripImagesFromSession(messages as SessionItem[])
+            
+            if (stripResult.stripped) {
+              log.info("AGENT", "Images stripped from session", {
+                itemCount: stripResult.itemCount,
+                imageCount: stripResult.imageCount,
+              })
+              
+              continue
+            }
+          }
+
+          throw error
+        }
+      }
 
       log.stopTimer("deepagent-run", "AGENT")
 
-      // Extract the final output from the agent's response
-      const output = result.messages?.[result.messages.length - 1]?.content || ""
-      const messageCount = result.messages?.length || 0
+      // Extract the final output from the stream's final state
+      const finalState = result?.snapshot || result?.finalState || {}
+      const finalMessages = finalState.messages || []
+      const output = finalMessages.length > 0 
+        ? (typeof finalMessages[finalMessages.length - 1]?.content === "string" 
+            ? finalMessages[finalMessages.length - 1].content 
+            : JSON.stringify(finalMessages[finalMessages.length - 1]?.content || ""))
+        : ""
+      const messageCount = finalMessages.length
 
-      log.success("AGENT", "DeepAgent invocation completed", {
+      log.success("AGENT", "DeepAgent invocation completed", { 
         messageCount,
         outputLength: typeof output === "string" ? output.length : 0,
         totalEvents: this.events.length,
@@ -214,7 +384,18 @@ export class AgentHarness {
         timestamp: new Date().toISOString(),
       })
 
-      return { success: true, output: typeof output === "string" ? output : JSON.stringify(output), events: this.events }
+      // Update coordinator status if available
+      if (this.coordinator) {
+        await this.coordinator.setStatus(this.agentId, "completed")
+      }
+
+      return { 
+        success: true, 
+        output: typeof output === "string" ? output : JSON.stringify(output), 
+        events: this.events,
+        coordinator: this.coordinator,
+        liveView: this.liveView,
+      }
     } catch (error) {
       log.stopTimer("deepagent-run", "AGENT")
 
@@ -231,13 +412,23 @@ export class AgentHarness {
           timestamp: new Date().toISOString(),
         })
 
-        return { success: true, output: "Agent finished via finish_scan or agent_finish", events: this.events }
+        if (this.coordinator) {
+          await this.coordinator.setStatus(this.agentId, "completed")
+        }
+
+        return { 
+          success: true, 
+          output: "Agent finished via finish_scan or agent_finish", 
+          events: this.events,
+          coordinator: this.coordinator,
+          liveView: this.liveView,
+        }
       }
 
       const errorMessage = error instanceof Error ? error.message : "Agent failed"
       const errorStack = error instanceof Error ? error.stack?.substring(0, 500) : undefined
 
-      log.error("AGENT", "DeepAgent invocation failed", undefined, {
+      log.error("AGENT", "DeepAgent invocation failed", undefined, { 
         error: errorMessage,
         stack: errorStack,
         totalEvents: this.events.length,
@@ -252,75 +443,104 @@ export class AgentHarness {
         timestamp: new Date().toISOString(),
       })
 
-      return { success: false, output: errorMessage, events: this.events }
+      if (this.coordinator) {
+        await this.coordinator.setStatus(this.agentId, "failed")
+      }
+
+      return { 
+        success: false, 
+        output: errorMessage, 
+        events: this.events,
+        coordinator: this.coordinator,
+        liveView: this.liveView,
+      }
     }
   }
 }
 
 export async function runAgent(config: AgentConfig): Promise<AgentRunResult> {
   log.info("AGENT", "runAgent() called", { scanId: config.scanId, agentId: config.agentId })
+  
+  // Get or create sandbox (with caching)
+  let sandbox = config.sandbox
+  if (!sandbox) {
+    log.info("AGENT", "No sandbox provided, getting or creating one...")
+    try {
+      sandbox = await getOrCreateSandbox({
+        scanId: config.scanId,
+        agentId: config.agentId,
+        targetUrl: "",  // Will be set from scan config
+      })
+      log.success("AGENT", "Sandbox ready", { containerId: sandbox.getContainerId()?.substring(0, 12) })
+    } catch (error) {
+      log.warn("AGENT", "Sandbox creation failed, falling back to host execution", undefined, {
+        error: error instanceof Error ? error.message : String(error)
+      })
+    }
+  }
+
+  // Create or use provided coordinator
+  let coordinator = config.coordinator
+  if (!coordinator) {
+    coordinator = new AgentCoordinator()
+    if (config.snapshotPath) {
+      coordinator.setSnapshotPath(config.snapshotPath)
+      
+      // Try to load snapshot if resuming
+      if (config.resume) {
+        const loaded = await coordinator.loadSnapshot()
+        if (loaded) {
+          log.info("AGENT", "Coordinator snapshot loaded", { scanId: config.scanId })
+        }
+      }
+    }
+    log.debug("AGENT", "Coordinator created", { resume: config.resume || false })
+  }
+
+  // Create or use provided LiveView
+  let liveView = config.liveView
+  if (!liveView) {
+    liveView = new LiveView()
+    log.debug("AGENT", "LiveView created")
+  }
+
   const harness = new AgentHarness(
     config.scanId,
     config.agentId,
     config.userId,
     config.onEvent,
     config.fetchFn,
-    config.sandbox
+    sandbox,
+    coordinator,
+    liveView
   )
 
-  return harness.run({
-    userId: config.userId,
-    model: config.model,
-    systemPrompt: config.systemPrompt,
-    initialTask: config.initialTask,
-    abortSignal: config.abortSignal,
-    sandbox: config.sandbox,
-  })
-}
+  try {
+    return await harness.run({
+      userId: config.userId,
+      model: config.model,
+      systemPrompt: config.systemPrompt,
+      initialTask: config.initialTask,
+      abortSignal: config.abortSignal,
+      sandbox: config.sandbox,
+      coordinator,
+      liveView,
+      resume: config.resume,
+      snapshotPath: config.snapshotPath,
+    })
+  } finally {
+    // Save coordinator snapshot
+    if (coordinator && config.snapshotPath) {
+      log.debug("AGENT", "Saving coordinator snapshot...")
+      // Snapshot is saved automatically by coordinator
+    }
 
-export function buildRootScanTask(config: ScanConfig): string {
-  const sections: string[] = [
-    "Scan the following web application.",
-    "",
-    "URLs:",
-    `- ${config.targetUrl}`,
-  ]
-
-  if (config.allowedHostnames?.length) {
-    sections.push("", "Allowed hostnames:", ...config.allowedHostnames.map((hostname) => `- ${hostname}`))
+    // Cleanup sandbox on completion (if we created it)
+    if (sandbox && !config.sandbox) {
+      log.info("AGENT", "Cleaning up sandbox...")
+      await cleanupSandbox(config.scanId)
+    }
   }
-
-  sections.push(
-    "",
-    "Scan configuration:",
-    `- Scope mode: ${config.scopeMode}`,
-    `- Aggressiveness: ${config.aggressiveness}`,
-    `- Scan mode: ${config.scanMode || "standard"}`
-  )
-
-  if (config.maxDepth) {
-    sections.push(`- Max depth: ${config.maxDepth}`)
-  }
-
-  if (config.maxAgents) {
-    sections.push(`- Max agents: ${config.maxAgents}`)
-  }
-
-  if (config.instruction?.trim()) {
-    sections.push("", `Special instructions: ${config.instruction.trim()}`)
-  }
-
-  sections.push(
-    "",
-    "Operational requirements:",
-    "- Start by calling create_todo to track the scan phases and coverage.",
-    "- Do not start with ad hoc curl or wget probes. Use exec_command only when it advances a defined phase.",
-    "- Prefer Bloodhunter state tools for scan output: report_endpoint, report_finding, record_note, and finish_scan.",
-    "- Load relevant skills before specialized vulnerability testing or tool-heavy workflows.",
-    "- Spawn specialized agents only for concrete subtasks that improve coverage or validation."
-  )
-
-  return sections.join("\n")
 }
 
 export function buildReconSystemPrompt(config: {
@@ -342,4 +562,35 @@ export function buildReconSystemPrompt(config: {
     interactive: false,
     existingEvents: config.existingEvents,
   })
+}
+
+export function buildRootScanTask(scanConfig: {
+  targetUrl: string
+  scopeMode: string
+  aggressiveness: string
+  scanMode?: string
+  instruction?: string
+  allowedHostnames?: string[]
+}): string {
+  const parts: string[] = []
+  
+  parts.push(`Target: ${scanConfig.targetUrl}`)
+  parts.push(`Scope: ${scanConfig.scopeMode}`)
+  parts.push(`Aggressiveness: ${scanConfig.aggressiveness}`)
+  
+  if (scanConfig.scanMode) {
+    parts.push(`Scan Mode: ${scanConfig.scanMode}`)
+  }
+  
+  if (scanConfig.allowedHostnames && scanConfig.allowedHostnames.length > 0) {
+    parts.push(`Allowed Hostnames: ${scanConfig.allowedHostnames.join(", ")}`)
+  }
+  
+  if (scanConfig.instruction) {
+    parts.push(`\nUser Instructions:\n${scanConfig.instruction}`)
+  }
+  
+  parts.push(`\nBegin the security scan. Start with reconnaissance and report your findings.`)
+  
+  return parts.join("\n")
 }
