@@ -44,13 +44,14 @@ export function ThemeProvider({
 }: {
   children: React.ReactNode
 }) {
-  const [theme, setThemeState] = useState<Theme>("system")
+  const [theme, setThemeState] = useState<Theme>(() => {
+    if (typeof window === "undefined") return "system"
+    return getStoredTheme()
+  })
 
   useEffect(() => {
-    const storedTheme = getStoredTheme()
-    setThemeState(storedTheme)
-    applyTheme(storedTheme)
-  }, [])
+    applyTheme(theme)
+  }, [theme])
 
   useEffect(() => {
     if (theme !== "system" || typeof window === "undefined") return

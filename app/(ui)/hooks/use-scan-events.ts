@@ -98,7 +98,8 @@ export function useScanEvents({
   }, [connect])
 
   useEffect(() => {
-    connect()
+    const connectFn = connectRef.current
+    connectFn()
 
     return () => {
       // Cleanup on unmount
@@ -110,7 +111,7 @@ export function useScanEvents({
         wsRef.current = null
       }
     }
-  }, [connect])
+  }, [])
 
   const addLocalEvent = useCallback((event: ScanEvent) => {
     setEvents((prev) => [...prev, event])

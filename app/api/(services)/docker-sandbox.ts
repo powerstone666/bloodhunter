@@ -32,7 +32,7 @@ export interface ExecResult {
   duration: number
 }
 
-const DEFAULT_IMAGE = "bloodhunter/sandbox:latest"
+const DEFAULT_IMAGE = "ghcr.io/usestrix/strix-sandbox:latest"
 
 // Session cache — reuse containers across scans
 const SESSION_CACHE = new Map<string, DockerSandbox>()

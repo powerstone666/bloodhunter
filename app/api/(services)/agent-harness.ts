@@ -23,6 +23,8 @@ import { log } from "./logger"
 import { AgentCoordinator } from "./agent-coordinator"
 import { LiveView } from "./live-view"
 import { ImageStripper, createImageStripper, type SessionItem } from "./image-stripper"
+import { ReportWriter } from "./report-writer"
+import path from "path"
 import {
   createRecordNoteTool,
   createEmitLogTool,
@@ -86,6 +88,7 @@ export class AgentHarness {
   private coordinator?: AgentCoordinator
   private liveView?: LiveView
   private imageStripper: ImageStripper
+  private reportWriter?: ReportWriter
 
   constructor(
     private readonly scanId: string,
@@ -111,6 +114,11 @@ export class AgentHarness {
     this.coordinator = coordinator
     this.liveView = liveView
     this.imageStripper = createImageStripper()
+    
+    // Initialize report writer
+    const runDir = path.join(process.cwd(), "data", "scans", scanId)
+    this.reportWriter = new ReportWriter({ runDir, scanId })
+    log.debug("AGENT", "ReportWriter initialized", { runDir })
   }
 
   private emitEvent(event: ScanEvent): void {
@@ -269,8 +277,9 @@ BEGIN NOW with your first tool call.`,
             }
 
             // Emit thinking events for agent reasoning
-            if ((event as any).type === "agent" && (event as any).snapshot?.messages) {
-              const lastMessage = (event as any).snapshot.messages[(event as any).snapshot.messages.length - 1]
+            if ((event as { type?: string }).type === "agent" && (event as { snapshot?: { messages?: Array<{ role?: string; content?: unknown }> } }).snapshot?.messages) {
+              const eventWithSnapshot = event as unknown as { snapshot: { messages: Array<{ role?: string; content?: unknown }> } }
+              const lastMessage = eventWithSnapshot.snapshot.messages[eventWithSnapshot.snapshot.messages.length - 1]
               if (lastMessage?.role === "assistant" && lastMessage.content) {
                 const content = typeof lastMessage.content === "string" 
                   ? lastMessage.content 
@@ -289,8 +298,9 @@ BEGIN NOW with your first tool call.`,
             }
 
             // Emit tool call events
-            if ((event as any).type === "tool" && (event as any).snapshot?.messages) {
-              const lastMessage = (event as any).snapshot.messages[(event as any).snapshot.messages.length - 1]
+            if ((event as { type?: string }).type === "tool" && (event as { snapshot?: { messages?: Array<{ role?: string; tool_calls?: Array<{ name: string; args: unknown }> }> } }).snapshot?.messages) {
+              const eventWithSnapshot = event as unknown as { snapshot: { messages: Array<{ role?: string; tool_calls?: Array<{ name: string; args: unknown }> }> } }
+              const lastMessage = eventWithSnapshot.snapshot.messages[eventWithSnapshot.snapshot.messages.length - 1]
               if (lastMessage?.role === "tool") {
                 const toolCall = lastMessage.tool_calls?.[0]
                 if (toolCall) {
@@ -308,8 +318,9 @@ BEGIN NOW with your first tool call.`,
             }
 
             // Emit tool result events
-            if ((event as any).type === "tool" && (event as any).snapshot?.messages) {
-              const messages = (event as any).snapshot.messages
+            if ((event as { type?: string }).type === "tool" && (event as { snapshot?: { messages?: Array<{ role?: string; content?: unknown; tool_calls?: Array<{ name: string }> }> } }).snapshot?.messages) {
+              const eventWithSnapshot = event as unknown as { snapshot: { messages: Array<{ role?: string; content?: unknown; tool_calls?: Array<{ name: string }> }> } }
+              const messages = eventWithSnapshot.snapshot.messages
               const lastMessage = messages[messages.length - 1]
               if (lastMessage?.role === "tool" && lastMessage.content) {
                 const toolCall = lastMessage.tool_calls?.[0]
@@ -359,9 +370,10 @@ BEGIN NOW with your first tool call.`,
 
       log.stopTimer("deepagent-run", "AGENT")
 
-      // Extract the final output from the stream's final state
-      const finalState = result?.snapshot || result?.finalState || {}
-      const finalMessages = finalState.messages || []
+      // Extract the final output from the stream
+      // The stream is an IterableReadableStream, so we need to get the final state from the last event
+      const finalState = (result as { finalState?: { messages?: Array<{ content?: unknown }> } })?.finalState || {}
+      const finalMessages = (finalState as { messages?: Array<{ content?: unknown }> })?.messages || []
       const output = finalMessages.length > 0 
         ? (typeof finalMessages[finalMessages.length - 1]?.content === "string" 
             ? finalMessages[finalMessages.length - 1].content 
