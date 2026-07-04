@@ -87,7 +87,15 @@ app.prepare().then(() => {
   })
 
   // Graceful shutdown
+  let isShuttingDown = false
+  
   const shutdown = () => {
+    if (isShuttingDown) {
+      log.warn("SERVER", "Shutdown already in progress, forcing exit...")
+      process.exit(1)
+    }
+    
+    isShuttingDown = true
     log.info("SERVER", "Shutting down...")
     
     // Close all WebSocket connections
@@ -98,12 +106,19 @@ app.prepare().then(() => {
     }
     wsConnections.clear()
 
+    // Force exit after timeout
+    const forceExitTimeout = setTimeout(() => {
+      log.warn("SERVER", "Graceful shutdown timeout, forcing exit...")
+      process.exit(1)
+    }, 5000)
+
     wss.close(() => {
       log.success("WS", "WebSocket server stopped")
     })
 
     server.close(() => {
       log.success("SERVER", "HTTP server stopped")
+      clearTimeout(forceExitTimeout)
       process.exit(0)
     })
   }
